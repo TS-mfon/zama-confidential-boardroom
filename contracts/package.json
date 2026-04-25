@@ -1,0 +1,12 @@
+{
+  "name": "confidential-boardroom-contracts",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "forge build"
+  },
+  "dependencies": {
+    "@fhevm/solidity": "^0.11.1"
+  }
+}

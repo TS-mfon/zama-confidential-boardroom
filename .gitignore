@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.vercel/
+.env
+.env.local
+coverage/
+*.tsbuildinfo
+frontend/node_modules/
+contracts/cache/
+contracts/out/
