@@ -60,6 +60,16 @@ export const boardroomAbi = [
     stateMutability: "nonpayable",
     inputs: [{ name: "proposalId", type: "uint256" }],
     outputs: []
+  },
+  {
+    type: "function",
+    name: "hasVoted",
+    stateMutability: "view",
+    inputs: [
+      { name: "proposalId", type: "uint256" },
+      { name: "voter", type: "address" }
+    ],
+    outputs: [{ type: "bool" }]
   }
 ] as const;
 

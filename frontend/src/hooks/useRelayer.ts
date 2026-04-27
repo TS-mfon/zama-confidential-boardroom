@@ -7,11 +7,8 @@ export async function getRelayer() {
   if (!relayerPromise) {
     relayerPromise = createInstance({
       ...SepoliaConfig,
-      network: env.sepoliaRpcUrl,
-      chainId: env.hostChainId,
-      gatewayChainId: env.gatewayChainId,
-      relayerUrl: env.relayerUrl
-    }).catch((error) => {
+      network: env.sepoliaRpcUrl
+    }).catch((error: unknown) => {
       relayerPromise = null;
       throw error;
     });

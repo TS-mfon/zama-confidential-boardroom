@@ -1,38 +1,148 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { useAccount, useReadContract, useSwitchChain, useWriteContract } from "wagmi";
-import { sepolia } from "wagmi/chains";
 import { toHex } from "viem";
-import { Header } from "./components/Header";
-import { ProposalList } from "./components/ProposalList";
-import { ProposalDetail } from "./components/ProposalDetail";
+import {
+  useAccount,
+  useConnect,
+  useDisconnect,
+  useReadContract,
+  useSwitchChain,
+  useWriteContract
+} from "wagmi";
+import { sepolia } from "wagmi/chains";
 import { GuideOverlay } from "./components/GuideOverlay";
 import { getRelayer } from "./hooks/useRelayer";
 import { useProposals } from "./hooks/useProposals";
 import { boardroomAbi, tokenAbi } from "./lib/contracts";
 import { env } from "./lib/env";
+import type { ProposalRecord } from "./lib/types";
 
-function futureWindow() {
+type Route =
+  | { page: "home" }
+  | { page: "proposals" }
+  | { page: "proposal"; proposalId: number }
+  | { page: "voting" }
+  | { page: "about" }
+  | { page: "dashboard" };
+
+function proposalWindow() {
   const now = Math.floor(Date.now() / 1000);
   return {
-    startTime: BigInt(now + 60),
-    endTime: BigInt(now + 60 * 60 * 24)
+    startTime: BigInt(now - 60),
+    endTime: BigInt(now + 60 * 60 * 24 * 2)
   };
 }
 
+function parseRoute(pathname: string): Route {
+  if (pathname === "/proposals") return { page: "proposals" };
+  if (pathname === "/voting") return { page: "voting" };
+  if (pathname === "/about") return { page: "about" };
+  if (pathname === "/dashboard") return { page: "dashboard" };
+  if (pathname.startsWith("/proposals/")) {
+    const proposalId = Number(pathname.split("/")[2]);
+    if (Number.isFinite(proposalId) && proposalId > 0) {
+      return { page: "proposal", proposalId };
+    }
+  }
+  return { page: "home" };
+}
+
+function formatDate(unixSeconds: number) {
+  return new Date(unixSeconds * 1000).toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit"
+  });
+}
+
+function shortenAddress(address: string) {
+  return `${address.slice(0, 6)}...${address.slice(-4)}`;
+}
+
+function proposalState(proposal: ProposalRecord) {
+  const now = Math.floor(Date.now() / 1000);
+  if (proposal.result) return "Revealed";
+  if (proposal.finalized) return proposal.revealRequested ? "Reveal Ready" : "Finalized";
+  if (now < proposal.startTime) return "Scheduled";
+  if (now > proposal.endTime) return "Awaiting Close";
+  return "Voting Live";
+}
+
+function isVotingActive(proposal: ProposalRecord) {
+  const now = Math.floor(Date.now() / 1000);
+  return now >= proposal.startTime && now <= proposal.endTime && !proposal.finalized;
+}
+
+function useRoute() {
+  const [route, setRoute] = useState<Route>(() => parseRoute(window.location.pathname));
+
+  useEffect(() => {
+    const onPopState = () => setRoute(parseRoute(window.location.pathname));
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
+
+  function navigate(pathname: string) {
+    if (window.location.pathname !== pathname) {
+      window.history.pushState({}, "", pathname);
+      setRoute(parseRoute(pathname));
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    }
+  }
+
+  return { route, navigate };
+}
+
+function NavLink({
+  href,
+  label,
+  navigate
+}: {
+  href: string;
+  label: string;
+  navigate: (pathname: string) => void;
+}) {
+  const currentPath = window.location.pathname;
+  const active = currentPath === href || (href === "/proposals" && currentPath.startsWith("/proposals/"));
+
+  return (
+    <a
+      href={href}
+      className={`nav-link ${active ? "active" : ""}`}
+      onClick={(event) => {
+        event.preventDefault();
+        navigate(href);
+      }}
+    >
+      {label}
+    </a>
+  );
+}
+
 export default function App() {
-  const [selectedId, setSelectedId] = useState(1);
   const [form, setForm] = useState({
     title: "",
     description: "",
     category: "Treasury"
   });
-  const [actionMessage, setActionMessage] = useState<string>("");
+  const [actionMessage, setActionMessage] = useState("");
+  const [actionTone, setActionTone] = useState<"default" | "error">("default");
+  const { route, navigate } = useRoute();
   const { address, chainId, isConnected } = useAccount();
-  const { switchChainAsync } = useSwitchChain();
+  const { connect, connectors, isPending: connectPending } = useConnect();
+  const { disconnect } = useDisconnect();
+  const { switchChainAsync, switchChain } = useSwitchChain();
   const { writeContractAsync, isPending } = useWriteContract();
   const queryClient = useQueryClient();
-  const { data = [], error } = useProposals();
+  const { data = [] } = useProposals();
+
+  const featuredProposal = data[0];
+  const selectedProposal = useMemo(
+    () => (route.page === "proposal" ? data.find((proposal) => proposal.id === route.proposalId) : undefined),
+    [data, route]
+  );
+
   const { data: hasClaimedVotes } = useReadContract({
     address: env.boardroomTokenAddress as `0x${string}`,
     abi: tokenAbi,
@@ -41,16 +151,27 @@ export default function App() {
     query: { enabled: Boolean(address) }
   });
 
-  useEffect(() => {
-    if (data.length > 0 && !data.some((proposal) => proposal.id === selectedId)) {
-      setSelectedId(data[0].id);
-    }
-  }, [data, selectedId]);
+  const { data: alreadyVoted } = useReadContract({
+    address: env.boardroomAddress as `0x${string}`,
+    abi: boardroomAbi,
+    functionName: "hasVoted",
+    args:
+      address && selectedProposal
+        ? [BigInt(selectedProposal.id), address as `0x${string}`]
+        : undefined,
+    query: { enabled: Boolean(address && selectedProposal) }
+  });
 
-  const selectedProposal = useMemo(
-    () => data.find((proposal) => proposal.id === selectedId) ?? data[0],
-    [data, selectedId]
-  );
+  useEffect(() => {
+    if (route.page === "proposal" && !selectedProposal && data.length > 0) {
+      navigate("/proposals");
+    }
+  }, [data.length, navigate, route.page, selectedProposal]);
+
+  function setFeedback(message: string, tone: "default" | "error" = "default") {
+    setActionMessage(message);
+    setActionTone(tone);
+  }
 
   async function ensureSepolia() {
     if (chainId !== sepolia.id) {
@@ -64,78 +185,84 @@ export default function App() {
 
   async function claimVotes() {
     try {
-      setActionMessage("");
+      setFeedback("");
       await ensureSepolia();
       const hash = await writeContractAsync({
         address: env.boardroomTokenAddress as `0x${string}`,
         abi: tokenAbi,
         functionName: "claimDemoVotes"
       });
-      setActionMessage(`Votes claimed. Tx: ${hash.slice(0, 10)}...`);
+      setFeedback(`Voting power claimed. ${hash.slice(0, 10)}...`);
     } catch (error) {
-      setActionMessage(error instanceof Error ? error.message : "Claim failed");
+      setFeedback(error instanceof Error ? error.message : "Claim failed", "error");
     }
   }
 
   async function createProposal() {
     try {
       if (!isConnected) {
-        setActionMessage("Connect your wallet first.");
+        setFeedback("Connect wallet first.", "error");
         return;
       }
       if (!form.title.trim() || !form.description.trim()) {
-        setActionMessage("Add a title and description.");
+        setFeedback("Add title and description.", "error");
         return;
       }
-      setActionMessage("");
+
+      setFeedback("");
       await ensureSepolia();
-      const { startTime, endTime } = futureWindow();
+      const { startTime, endTime } = proposalWindow();
       const hash = await writeContractAsync({
         address: env.boardroomAddress as `0x${string}`,
         abi: boardroomAbi,
         functionName: "createProposal",
         args: [form.title.trim(), form.description.trim(), form.category.trim(), startTime, endTime]
       });
-      setActionMessage(`Proposal submitted. Tx: ${hash.slice(0, 10)}...`);
-      setForm({ title: "", description: "", category: form.category });
+
+      setFeedback(`Proposal created. ${hash.slice(0, 10)}...`);
+      setForm({ title: "", description: "", category: "Treasury" });
       setTimeout(() => {
         void refresh();
       }, 3500);
+      navigate("/proposals");
     } catch (error) {
-      setActionMessage(error instanceof Error ? error.message : "Proposal creation failed");
+      setFeedback(error instanceof Error ? error.message : "Proposal creation failed", "error");
     }
   }
 
   async function castVote(proposalId: number, choice: 0 | 1 | 2) {
     try {
       if (!address) {
-        setActionMessage("Connect your wallet first.");
+        setFeedback("Connect wallet first.", "error");
         return;
       }
-      setActionMessage("");
+
+      setFeedback("");
       await ensureSepolia();
       const relayer = await getRelayer();
       const encryptedInput = relayer.createEncryptedInput(env.boardroomAddress, address);
       encryptedInput.add8(choice);
       const proof = await encryptedInput.encrypt();
+
       const hash = await writeContractAsync({
         address: env.boardroomAddress as `0x${string}`,
         abi: boardroomAbi,
         functionName: "castVote",
         args: [BigInt(proposalId), toHex(proof.handles[0]), toHex(proof.inputProof)]
       });
-      setActionMessage(`Encrypted vote sent. Tx: ${hash.slice(0, 10)}...`);
+
+      setFeedback(`Encrypted ballot sent. ${hash.slice(0, 10)}...`);
       setTimeout(() => {
         void refresh();
       }, 3500);
     } catch (error) {
-      setActionMessage(error instanceof Error ? error.message : "Vote failed");
+      setFeedback(error instanceof Error ? error.message : "Vote failed", "error");
     }
   }
 
   async function finalizeProposal(proposalId: number) {
     try {
-      setActionMessage("");
+      setFeedback("");
       await ensureSepolia();
       const hash = await writeContractAsync({
         address: env.boardroomAddress as `0x${string}`,
@@ -143,18 +270,18 @@ export default function App() {
         functionName: "finalizeProposal",
         args: [BigInt(proposalId)]
       });
-      setActionMessage(`Proposal finalized. Tx: ${hash.slice(0, 10)}...`);
+      setFeedback(`Proposal finalized. ${hash.slice(0, 10)}...`);
       setTimeout(() => {
         void refresh();
       }, 3500);
     } catch (error) {
-      setActionMessage(error instanceof Error ? error.message : "Finalize failed");
+      setFeedback(error instanceof Error ? error.message : "Finalize failed", "error");
     }
   }
 
   async function prepareReveal(proposalId: number) {
     try {
-      setActionMessage("");
+      setFeedback("");
       await ensureSepolia();
       const hash = await writeContractAsync({
         address: env.boardroomAddress as `0x${string}`,
@@ -162,90 +289,443 @@ export default function App() {
         functionName: "prepareFinalReveal",
         args: [BigInt(proposalId)]
       });
-      setActionMessage(`Reveal prepared. Tx: ${hash.slice(0, 10)}...`);
+      setFeedback(`Reveal prepared. ${hash.slice(0, 10)}...`);
       setTimeout(() => {
         void refresh();
       }, 3500);
     } catch (error) {
-      setActionMessage(error instanceof Error ? error.message : "Prepare reveal failed");
+      setFeedback(error instanceof Error ? error.message : "Prepare reveal failed", "error");
     }
   }
 
   return (
-    <main className="shell">
+    <main className="app-shell">
       <GuideOverlay />
-      <Header
-        proposals={data}
-        hasClaimedVotes={hasClaimedVotes}
-        onClaimVotes={claimVotes}
-        actionPending={isPending}
-      />
 
-      <section className="section split">
-        <article className="card">
-          <p className="eyebrow">Create</p>
-          <h2>New proposal</h2>
-          <p className="muted section-note">Launch a treasury, policy, or allocation vote from your wallet.</p>
-          <div className="form-grid">
-            <label>
-              <span>Title</span>
-              <input
-                value={form.title}
-                onChange={(event) => setForm((current) => ({ ...current, title: event.target.value }))}
-                placeholder="Treasury diversification"
-              />
-            </label>
-            <label>
-              <span>Category</span>
-              <select
-                value={form.category}
-                onChange={(event) => setForm((current) => ({ ...current, category: event.target.value }))}
-              >
-                <option>Treasury</option>
-                <option>Policy</option>
-                <option>Risk</option>
-                <option>Budget</option>
-              </select>
-            </label>
-            <label className="full">
-              <span>Description</span>
-              <textarea
-                value={form.description}
-                onChange={(event) => setForm((current) => ({ ...current, description: event.target.value }))}
-                placeholder="Move 15% of idle treasury into a lower-volatility yield strategy."
-                rows={5}
-              />
-            </label>
-          </div>
-          <div className="button-row">
-            <button onClick={createProposal} disabled={isPending}>Create proposal</button>
-          </div>
-          {actionMessage ? <p className="muted action-copy">{actionMessage}</p> : null}
-        </article>
+      <header className="topbar">
+        <a
+          href="/"
+          className="brand"
+          onClick={(event) => {
+            event.preventDefault();
+            navigate("/");
+          }}
+        >
+          <span className="brand-mark">CB</span>
+          <span className="brand-copy">
+            <strong>Confidential Boardroom</strong>
+            <small>Private governance for live treasuries</small>
+          </span>
+        </a>
 
-        <article className="card accent">
-          <p className="eyebrow">How voting works</p>
-          <h3>Boardroom Votes</h3>
-          <ul className="list">
-            <li>Claim demo voting power once.</li>
-            <li>Create or open a proposal.</li>
-            <li>Cast an encrypted ballot.</li>
-            <li>Reveal only the final tally.</li>
-          </ul>
-          {error ? <p className="muted action-copy">Live proposal sync is temporarily unavailable.</p> : null}
-        </article>
+        <nav className="nav">
+          <NavLink href="/" label="Home" navigate={navigate} />
+          <NavLink href="/proposals" label="Proposals" navigate={navigate} />
+          <NavLink href="/voting" label="Voting" navigate={navigate} />
+          <NavLink href="/about" label="About" navigate={navigate} />
+          <NavLink href="/dashboard" label="Dashboard" navigate={navigate} />
+        </nav>
+      </header>
+
+      <section className="wallet-band panel">
+        <div>
+          <span className="mini-label">Wallet</span>
+          <h2>{isConnected && address ? shortenAddress(address) : "Connect MetaMask"}</h2>
+          <p>{chainId === sepolia.id ? "Sepolia ready" : "Use Ethereum Sepolia for every action."}</p>
+        </div>
+        <div className="wallet-band-actions">
+          {!isConnected ? (
+            <button
+              onClick={() => {
+                const connector = connectors[0];
+                if (connector) connect({ connector });
+              }}
+              disabled={connectPending || connectors.length === 0}
+            >
+              {connectPending ? "Connecting..." : "Connect wallet"}
+            </button>
+          ) : (
+            <>
+              <button className="secondary" onClick={() => switchChain({ chainId: sepolia.id })} disabled={chainId === sepolia.id}>
+                {chainId === sepolia.id ? "Sepolia connected" : "Switch network"}
+              </button>
+              <button onClick={claimVotes} disabled={isPending || Boolean(hasClaimedVotes)}>
+                {hasClaimedVotes ? "Votes claimed" : "Claim voting power"}
+              </button>
+              <button className="secondary" onClick={() => disconnect()}>
+                Disconnect
+              </button>
+            </>
+          )}
+        </div>
       </section>
 
-      <ProposalList proposals={data} onSelect={setSelectedId} />
-      <ProposalDetail
-        proposals={data}
-        selectedId={selectedProposal?.id ?? selectedId}
-        actionPending={isPending}
-        actionMessage={actionMessage}
-        onVote={castVote}
-        onFinalize={finalizeProposal}
-        onPrepareReveal={prepareReveal}
-      />
+      {actionMessage ? (
+        <section className={`feedback ${actionTone === "error" ? "error" : ""}`}>
+          <span>{actionMessage}</span>
+        </section>
+      ) : null}
+
+      {route.page === "home" ? (
+        <>
+          <section className="hero panel">
+            <div className="hero-copy">
+              <span className="mini-label">Confidential governance</span>
+              <h1>Weighted voting without leaking strategy.</h1>
+              <p className="hero-text">
+                Create public proposals, cast encrypted ballots, and reveal only the final aggregate result.
+              </p>
+              <div className="hero-actions">
+                <button onClick={() => navigate("/proposals")}>Explore proposals</button>
+                <button className="secondary" onClick={() => navigate("/voting")}>How it works</button>
+              </div>
+            </div>
+
+            <div className="hero-card-grid">
+              <article className="mini-card">
+                <span className="mini-label">Live proposals</span>
+                <strong>{data.length}</strong>
+                <p>Read from Sepolia.</p>
+              </article>
+              <article className="mini-card">
+                <span className="mini-label">Vote token</span>
+                <strong>Boardroom Votes</strong>
+                <p>Claim once.</p>
+              </article>
+              <article className="mini-card">
+                <span className="mini-label">Reveal style</span>
+                <strong>Final tally only</strong>
+                <p>No live leak.</p>
+              </article>
+            </div>
+          </section>
+
+          <section className="content-grid">
+            <article className="panel">
+              <div className="section-head">
+                <div>
+                  <span className="mini-label">Featured proposal</span>
+                  <h2>{featuredProposal ? featuredProposal.title : "No proposal yet"}</h2>
+                </div>
+                {featuredProposal ? <span className="state-pill">{proposalState(featuredProposal)}</span> : null}
+              </div>
+              <p className="section-copy">
+                {featuredProposal
+                  ? featuredProposal.description
+                  : "Open the dashboard to create the first proposal after claiming demo voting power."}
+              </p>
+              {featuredProposal ? (
+                <div className="meta-row">
+                  <span>{featuredProposal.category}</span>
+                  <span>{formatDate(featuredProposal.endTime)}</span>
+                  <span>{shortenAddress(featuredProposal.proposer)}</span>
+                </div>
+              ) : null}
+              <div className="hero-actions">
+                <button onClick={() => navigate(featuredProposal ? `/proposals/${featuredProposal.id}` : "/dashboard")}>
+                  {featuredProposal ? "Open proposal" : "Open dashboard"}
+                </button>
+              </div>
+            </article>
+
+            <article className="panel accent-panel">
+              <span className="mini-label">Why it matters</span>
+              <h2>Private signals. Public outcomes.</h2>
+              <div className="feature-list">
+                <div>
+                  <strong>Encrypted ballots</strong>
+                  <p>Voting intent stays hidden during the active window.</p>
+                </div>
+                <div>
+                  <strong>Weighted governance</strong>
+                  <p>Each wallet votes with confidential demo balances.</p>
+                </div>
+                <div>
+                  <strong>Controlled reveal</strong>
+                  <p>Only the aggregate result becomes public.</p>
+                </div>
+              </div>
+            </article>
+          </section>
+        </>
+      ) : null}
+
+      {route.page === "proposals" ? (
+        <section className="page-stack">
+          <section className="page-hero">
+            <span className="mini-label">Proposals</span>
+            <h1>Live board agenda</h1>
+            <p>Open a proposal packet to vote privately or manage the reveal flow.</p>
+          </section>
+
+          <section className="proposal-grid">
+            {data.length === 0 ? (
+              <article className="panel empty-panel">
+                <h3>No proposals yet</h3>
+                <p>Create the first governance packet from the dashboard.</p>
+              </article>
+            ) : (
+              data.map((proposal) => (
+                <article className="panel proposal-card" key={proposal.id}>
+                  <div className="section-head">
+                    <span className="tag">{proposal.category}</span>
+                    <span className="state-pill">{proposalState(proposal)}</span>
+                  </div>
+                  <h3>{proposal.title}</h3>
+                  <p>{proposal.description}</p>
+                  <div className="meta-row">
+                    <span>{formatDate(proposal.startTime)}</span>
+                    <span>{formatDate(proposal.endTime)}</span>
+                  </div>
+                  <button onClick={() => navigate(`/proposals/${proposal.id}`)}>Open proposal</button>
+                </article>
+              ))
+            )}
+          </section>
+        </section>
+      ) : null}
+
+      {route.page === "proposal" && selectedProposal ? (
+        <section className="page-stack">
+          <section className="page-hero">
+            <span className="mini-label">Proposal detail</span>
+            <h1>{selectedProposal.title}</h1>
+            <p>{selectedProposal.description}</p>
+          </section>
+
+          <section className="content-grid">
+            <article className="panel">
+              <div className="section-head">
+                <span className="tag">{selectedProposal.category}</span>
+                <span className="state-pill">{proposalState(selectedProposal)}</span>
+              </div>
+
+              <div className="detail-grid">
+                <div>
+                  <span className="mini-label">Proposer</span>
+                  <strong>{shortenAddress(selectedProposal.proposer)}</strong>
+                </div>
+                <div>
+                  <span className="mini-label">Start</span>
+                  <strong>{formatDate(selectedProposal.startTime)}</strong>
+                </div>
+                <div>
+                  <span className="mini-label">End</span>
+                  <strong>{formatDate(selectedProposal.endTime)}</strong>
+                </div>
+                <div>
+                  <span className="mini-label">Vote token</span>
+                  <strong>Boardroom Votes</strong>
+                </div>
+              </div>
+
+              <div className="action-grid">
+                <button
+                  onClick={() => castVote(selectedProposal.id, 1)}
+                  disabled={isPending || !isVotingActive(selectedProposal) || Boolean(alreadyVoted)}
+                >
+                  Vote For
+                </button>
+                <button
+                  className="secondary"
+                  onClick={() => castVote(selectedProposal.id, 0)}
+                  disabled={isPending || !isVotingActive(selectedProposal) || Boolean(alreadyVoted)}
+                >
+                  Vote Against
+                </button>
+                <button
+                  className="secondary"
+                  onClick={() => castVote(selectedProposal.id, 2)}
+                  disabled={isPending || !isVotingActive(selectedProposal) || Boolean(alreadyVoted)}
+                >
+                  Abstain
+                </button>
+              </div>
+
+              <div className="action-grid secondary-actions">
+                <button
+                  className="secondary"
+                  onClick={() => finalizeProposal(selectedProposal.id)}
+                  disabled={isPending || selectedProposal.finalized || isVotingActive(selectedProposal)}
+                >
+                  Finalize
+                </button>
+                <button
+                  className="secondary"
+                  onClick={() => prepareReveal(selectedProposal.id)}
+                  disabled={isPending || !selectedProposal.finalized || selectedProposal.revealRequested}
+                >
+                  Prepare Reveal
+                </button>
+              </div>
+            </article>
+
+            <article className="panel accent-panel">
+              <span className="mini-label">Result</span>
+              <h2>{selectedProposal.result ? "Final tally" : "Private until reveal"}</h2>
+              {selectedProposal.result ? (
+                <div className="result-grid">
+                  <div>
+                    <span className="mini-label">For</span>
+                    <strong>{selectedProposal.result.forVotes.toString()}</strong>
+                  </div>
+                  <div>
+                    <span className="mini-label">Against</span>
+                    <strong>{selectedProposal.result.againstVotes.toString()}</strong>
+                  </div>
+                  <div>
+                    <span className="mini-label">Abstain</span>
+                    <strong>{selectedProposal.result.abstainVotes.toString()}</strong>
+                  </div>
+                </div>
+              ) : (
+                <p className="section-copy">Ballots and live tallies remain encrypted while voting is active.</p>
+              )}
+              <p className="section-copy">
+                {alreadyVoted
+                  ? "This wallet has already submitted a ballot for this proposal."
+                  : "Claim voting power once, then cast an encrypted ballot from this page."}
+              </p>
+            </article>
+          </section>
+        </section>
+      ) : null}
+
+      {route.page === "voting" ? (
+        <section className="page-stack">
+          <section className="page-hero">
+            <span className="mini-label">Voting flow</span>
+            <h1>How voting works</h1>
+            <p>The product separates every step so users can understand the flow before signing anything.</p>
+          </section>
+
+          <section className="timeline-grid">
+            {[
+              ["Claim voting power", "Mint one demo allocation of Boardroom Votes."],
+              ["Open a proposal", "Review the public packet and voting window."],
+              ["Cast encrypted ballot", "Submit a private for, against, or abstain vote."],
+              ["Reveal final tally", "Only the final aggregate result becomes public."]
+            ].map(([title, copy], index) => (
+              <article className="panel timeline-card" key={title}>
+                <span className="timeline-index">0{index + 1}</span>
+                <h3>{title}</h3>
+                <p>{copy}</p>
+              </article>
+            ))}
+          </section>
+
+          <section className="content-grid">
+            <article className="panel">
+              <span className="mini-label">Vote token</span>
+              <h2>Boardroom Votes</h2>
+              <p className="section-copy">
+                This demo uses Boardroom Votes. Each wallet claims once, then uses that confidential balance as voting power.
+              </p>
+            </article>
+            <article className="panel accent-panel">
+              <span className="mini-label">Quick start</span>
+              <h2>Use the app</h2>
+              <ul className="clean-list">
+                <li>Connect MetaMask on Sepolia.</li>
+                <li>Claim voting power in Dashboard.</li>
+                <li>Open or create a proposal.</li>
+                <li>Vote from the proposal page.</li>
+              </ul>
+            </article>
+          </section>
+        </section>
+      ) : null}
+
+      {route.page === "about" ? (
+        <section className="page-stack">
+          <section className="page-hero">
+            <span className="mini-label">About</span>
+            <h1>Built for treasury councils</h1>
+            <p>Confidential Boardroom is designed for DAOs, committees, and syndicates that need private weighted voting on public proposals.</p>
+          </section>
+
+          <section className="content-grid">
+            <article className="panel">
+              <span className="mini-label">Public data</span>
+              <h2>Proposal packet</h2>
+              <p className="section-copy">Titles, descriptions, categories, proposers, and voting windows stay visible.</p>
+            </article>
+            <article className="panel">
+              <span className="mini-label">Private data</span>
+              <h2>Ballot + weight</h2>
+              <p className="section-copy">Vote choices, weights, and interim counts remain encrypted until the end.</p>
+            </article>
+            <article className="panel accent-panel">
+              <span className="mini-label">Use cases</span>
+              <h2>Live governance</h2>
+              <p className="section-copy">Treasury shifts, grant approvals, budgets, and policy updates all fit this model.</p>
+            </article>
+          </section>
+        </section>
+      ) : null}
+
+      {route.page === "dashboard" ? (
+        <section className="page-stack">
+          <section className="page-hero">
+            <span className="mini-label">Dashboard</span>
+            <h1>Manage your session</h1>
+            <p>Claim demo voting power, create governance packets, and move into live voting from one place.</p>
+          </section>
+
+          <section className="content-grid">
+            <article className="panel">
+              <div className="section-head">
+                <div>
+                  <span className="mini-label">Voting power</span>
+                  <h2>Claim demo votes</h2>
+                </div>
+                <span className="state-pill">{hasClaimedVotes ? "Claimed" : "Available"}</span>
+              </div>
+              <p className="section-copy">Each wallet can claim one demo allocation of Boardroom Votes on Sepolia.</p>
+              <button onClick={claimVotes} disabled={isPending || Boolean(hasClaimedVotes)}>
+                {hasClaimedVotes ? "Voting power claimed" : "Claim voting power"}
+              </button>
+            </article>
+
+            <article className="panel accent-panel">
+              <span className="mini-label">Create proposal</span>
+              <h2>Launch a board vote</h2>
+              <div className="form-grid">
+                <label>
+                  <span>Title</span>
+                  <input
+                    value={form.title}
+                    onChange={(event) => setForm((current) => ({ ...current, title: event.target.value }))}
+                    placeholder="Treasury shift"
+                  />
+                </label>
+                <label>
+                  <span>Category</span>
+                  <select
+                    value={form.category}
+                    onChange={(event) => setForm((current) => ({ ...current, category: event.target.value }))}
+                  >
+                    <option>Treasury</option>
+                    <option>Policy</option>
+                    <option>Risk</option>
+                    <option>Budget</option>
+                  </select>
+                </label>
+                <label className="full">
+                  <span>Description</span>
+                  <textarea
+                    value={form.description}
+                    onChange={(event) => setForm((current) => ({ ...current, description: event.target.value }))}
+                    placeholder="Move a portion of idle treasury into a lower-volatility yield strategy."
+                    rows={5}
+                  />
+                </label>
+              </div>
+              <button onClick={createProposal} disabled={isPending}>Create proposal</button>
+            </article>
+          </section>
+        </section>
+      ) : null}
     </main>
   );
 }
