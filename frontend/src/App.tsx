@@ -162,6 +162,12 @@ export default function App() {
     query: { enabled: Boolean(address && selectedProposal) }
   });
 
+  const { data: boardroomOwner } = useReadContract({
+    address: env.boardroomAddress as `0x${string}`,
+    abi: boardroomAbi,
+    functionName: "owner"
+  });
+
   useEffect(() => {
     if (route.page === "proposal" && !selectedProposal && data.length > 0) {
       navigate("/proposals");
@@ -297,6 +303,54 @@ export default function App() {
       setFeedback(error instanceof Error ? error.message : "Prepare reveal failed", "error");
     }
   }
+
+  async function revealResults(proposalId: number) {
+    try {
+      setFeedback("");
+      await ensureSepolia();
+      const [forHandle, againstHandle, abstainHandle] = await queryClient.fetchQuery({
+        queryKey: ["reveal-handles", proposalId],
+        queryFn: async () => {
+          const { createPublicClient, http } = await import("viem");
+          const client = createPublicClient({
+            chain: sepolia,
+            transport: http(env.sepoliaRpcUrl)
+          });
+
+          return client.readContract({
+            address: env.boardroomAddress as `0x${string}`,
+            abi: boardroomAbi,
+            functionName: "getRevealHandles",
+            args: [BigInt(proposalId)]
+          });
+        }
+      });
+
+      const relayer = await getRelayer();
+      const results = await relayer.publicDecrypt([forHandle, againstHandle, abstainHandle]);
+
+      const hash = await writeContractAsync({
+        address: env.boardroomAddress as `0x${string}`,
+        abi: boardroomAbi,
+        functionName: "submitFinalReveal",
+        args: [BigInt(proposalId), results.abiEncodedClearValues, results.decryptionProof]
+      });
+
+      setFeedback(`Result revealed. ${hash.slice(0, 10)}...`);
+      setTimeout(() => {
+        void refresh();
+      }, 3500);
+    } catch (error) {
+      setFeedback(error instanceof Error ? error.message : "Reveal failed", "error");
+    }
+  }
+
+  const canManageSelectedProposal = Boolean(
+    selectedProposal &&
+      address &&
+      (address.toLowerCase() === selectedProposal.proposer.toLowerCase() ||
+        address.toLowerCase() === String(boardroomOwner).toLowerCase())
+  );
 
   return (
     <main className="app-shell">
@@ -546,16 +600,23 @@ export default function App() {
                 <button
                   className="secondary"
                   onClick={() => finalizeProposal(selectedProposal.id)}
-                  disabled={isPending || selectedProposal.finalized || isVotingActive(selectedProposal)}
+                  disabled={isPending || selectedProposal.finalized || isVotingActive(selectedProposal) || !canManageSelectedProposal}
                 >
                   Finalize
                 </button>
                 <button
                   className="secondary"
                   onClick={() => prepareReveal(selectedProposal.id)}
-                  disabled={isPending || !selectedProposal.finalized || selectedProposal.revealRequested}
+                  disabled={isPending || !selectedProposal.finalized || selectedProposal.revealRequested || !canManageSelectedProposal}
                 >
                   Prepare Reveal
+                </button>
+                <button
+                  className="secondary"
+                  onClick={() => revealResults(selectedProposal.id)}
+                  disabled={isPending || !selectedProposal.revealRequested || Boolean(selectedProposal.result) || !canManageSelectedProposal}
+                >
+                  Reveal Result
                 </button>
               </div>
             </article>
@@ -586,6 +647,9 @@ export default function App() {
                   ? "This wallet has already submitted a ballot for this proposal."
                   : "Claim voting power once, then cast an encrypted ballot from this page."}
               </p>
+              {!canManageSelectedProposal && selectedProposal.finalized ? (
+                <p className="section-copy">Only the proposal creator or deployer can finalize, prepare, and publish the final reveal.</p>
+              ) : null}
             </article>
           </section>
         </section>

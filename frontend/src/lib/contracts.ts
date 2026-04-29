@@ -63,6 +63,35 @@ export const boardroomAbi = [
   },
   {
     type: "function",
+    name: "submitFinalReveal",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "proposalId", type: "uint256" },
+      { name: "cleartexts", type: "bytes" },
+      { name: "decryptionProof", type: "bytes" }
+    ],
+    outputs: []
+  },
+  {
+    type: "function",
+    name: "getRevealHandles",
+    stateMutability: "view",
+    inputs: [{ name: "proposalId", type: "uint256" }],
+    outputs: [
+      { name: "forVotesHandle", type: "bytes32" },
+      { name: "againstVotesHandle", type: "bytes32" },
+      { name: "abstainVotesHandle", type: "bytes32" }
+    ]
+  },
+  {
+    type: "function",
+    name: "owner",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ type: "address" }]
+  },
+  {
+    type: "function",
     name: "hasVoted",
     stateMutability: "view",
     inputs: [

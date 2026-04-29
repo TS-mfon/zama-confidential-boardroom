@@ -2,6 +2,9 @@
 pragma solidity ^0.8.24;
 
 contract ResultRevealAdapter {
+    address public owner;
+    address public boardroom;
+
     struct RevealedResult {
         uint64 forVotes;
         uint64 againstVotes;
@@ -13,6 +16,27 @@ contract ResultRevealAdapter {
     mapping(uint256 => RevealedResult) private results;
 
     event ResultStored(uint256 indexed proposalId, uint64 forVotes, uint64 againstVotes, uint64 abstainVotes, bool passed);
+    event BoardroomSet(address indexed boardroom);
+
+    modifier onlyOwner() {
+        require(msg.sender == owner, "not owner");
+        _;
+    }
+
+    modifier onlyBoardroom() {
+        require(msg.sender == boardroom, "not boardroom");
+        _;
+    }
+
+    constructor() {
+        owner = msg.sender;
+    }
+
+    function setBoardroom(address boardroom_) external onlyOwner {
+        require(boardroom_ != address(0), "zero boardroom");
+        boardroom = boardroom_;
+        emit BoardroomSet(boardroom_);
+    }
 
     function storeRevealedResult(
         uint256 proposalId,
@@ -20,7 +44,7 @@ contract ResultRevealAdapter {
         uint64 againstVotes,
         uint64 abstainVotes,
         bool passed
-    ) external {
+    ) external onlyBoardroom {
         results[proposalId] = RevealedResult({
             forVotes: forVotes,
             againstVotes: againstVotes,

@@ -1,13 +1,27 @@
-import { createInstance, SepoliaConfig } from "@zama-fhe/relayer-sdk/web";
+import { createInstance, initSDK, SepoliaConfig } from "@zama-fhe/relayer-sdk/web";
 import { env } from "../lib/env";
 
 let relayerPromise: Promise<Awaited<ReturnType<typeof createInstance>>> | null = null;
+let initPromise: Promise<unknown> | null = null;
+
+async function ensureSdk() {
+  if (!initPromise) {
+    initPromise = initSDK().catch((error: unknown) => {
+      initPromise = null;
+      throw error;
+    });
+  }
+
+  await initPromise;
+}
 
 export async function getRelayer() {
   if (!relayerPromise) {
+    await ensureSdk();
+
     relayerPromise = createInstance({
       ...SepoliaConfig,
-      network: env.sepoliaRpcUrl
+      network: window.ethereum ?? env.sepoliaRpcUrl
     }).catch((error: unknown) => {
       relayerPromise = null;
       throw error;

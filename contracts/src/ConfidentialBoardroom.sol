@@ -10,6 +10,8 @@ interface IBoardroomToken {
 }
 
 contract ConfidentialBoardroom is ZamaEthereumConfig {
+    address public immutable owner;
+
     struct Proposal {
         uint256 id;
         string title;
@@ -36,10 +38,18 @@ contract ConfidentialBoardroom is ZamaEthereumConfig {
     event VoteCast(uint256 indexed proposalId, address indexed voter);
     event RevealPrepared(uint256 indexed proposalId);
     event ProposalFinalized(uint256 indexed proposalId);
+    event FinalRevealSubmitted(uint256 indexed proposalId, uint64 forVotes, uint64 againstVotes, uint64 abstainVotes, bool passed);
 
     constructor(address token_, address adapter_) {
+        owner = msg.sender;
         boardroomToken = IBoardroomToken(token_);
         resultAdapter = ResultRevealAdapter(adapter_);
+    }
+
+    modifier onlyProposalManager(uint256 proposalId) {
+        Proposal storage proposal = proposals[proposalId];
+        require(msg.sender == owner || msg.sender == proposal.proposer, "not proposal manager");
+        _;
     }
 
     function createProposal(
@@ -95,7 +105,7 @@ contract ConfidentialBoardroom is ZamaEthereumConfig {
         emit VoteCast(proposalId, msg.sender);
     }
 
-    function finalizeProposal(uint256 proposalId) external {
+    function finalizeProposal(uint256 proposalId) external onlyProposalManager(proposalId) {
         Proposal storage proposal = proposals[proposalId];
         require(block.timestamp > proposal.endTime, "vote active");
         require(!proposal.finalized, "finalized");
@@ -103,7 +113,7 @@ contract ConfidentialBoardroom is ZamaEthereumConfig {
         emit ProposalFinalized(proposalId);
     }
 
-    function prepareFinalReveal(uint256 proposalId) external {
+    function prepareFinalReveal(uint256 proposalId) external onlyProposalManager(proposalId) {
         Proposal storage proposal = proposals[proposalId];
         require(proposal.finalized, "not finalized");
         require(!proposal.revealRequested, "already requested");
@@ -116,7 +126,7 @@ contract ConfidentialBoardroom is ZamaEthereumConfig {
         emit RevealPrepared(proposalId);
     }
 
-    function submitFinalReveal(uint256 proposalId, bytes memory cleartexts, bytes memory decryptionProof) external {
+    function submitFinalReveal(uint256 proposalId, bytes memory cleartexts, bytes memory decryptionProof) external onlyProposalManager(proposalId) {
         Proposal storage proposal = proposals[proposalId];
         require(proposal.revealRequested, "reveal not prepared");
 
@@ -131,6 +141,17 @@ contract ConfidentialBoardroom is ZamaEthereumConfig {
         bool passed = forVotes > againstVotes;
 
         resultAdapter.storeRevealedResult(proposalId, forVotes, againstVotes, abstainVotes, passed);
+        emit FinalRevealSubmitted(proposalId, forVotes, againstVotes, abstainVotes, passed);
+    }
+
+    function getRevealHandles(uint256 proposalId) external view returns (bytes32 forVotesHandle, bytes32 againstVotesHandle, bytes32 abstainVotesHandle) {
+        Proposal storage proposal = proposals[proposalId];
+        require(proposal.revealRequested, "reveal not prepared");
+        return (
+            FHE.toBytes32(proposal.forVotes),
+            FHE.toBytes32(proposal.againstVotes),
+            FHE.toBytes32(proposal.abstainVotes)
+        );
     }
 
     function getProposal(uint256 proposalId) external view returns (
