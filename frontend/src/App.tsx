@@ -1,17 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { toHex } from "viem";
+import { encodeFunctionData, toHex } from "viem";
 import {
   useAccount,
   useConnect,
   useDisconnect,
   useReadContract,
-  useSwitchChain,
-  useWriteContract
+  useSwitchChain
 } from "wagmi";
 import { sepolia } from "wagmi/chains";
 import { GuideOverlay } from "./components/GuideOverlay";
-import { getRelayer } from "./hooks/useRelayer";
+import { getRelayer, warmRelayer } from "./hooks/useRelayer";
 import { useProposals } from "./hooks/useProposals";
 import { boardroomAbi, tokenAbi } from "./lib/contracts";
 import { env } from "./lib/env";
@@ -24,6 +23,12 @@ type Route =
   | { page: "voting" }
   | { page: "about" }
   | { page: "dashboard" };
+
+type EthereumProvider = {
+  request: (args: { method: string; params?: unknown[] }) => Promise<unknown>;
+};
+
+type TxPhase = "idle" | "preparing" | "wallet" | "confirming";
 
 function proposalWindow() {
   const now = Math.floor(Date.now() / 1000);
@@ -58,6 +63,45 @@ function formatDate(unixSeconds: number) {
 
 function shortenAddress(address: string) {
   return `${address.slice(0, 6)}...${address.slice(-4)}`;
+}
+
+function getWalletErrorMessage(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  const lower = message.toLowerCase();
+
+  if (lower.includes("user rejected") || lower.includes("user denied") || lower.includes("rejected the request")) {
+    return "User rejected the transaction.";
+  }
+
+  if (lower.includes("wrong relayer url") || lower.includes("__wbindgen_malloc")) {
+    return "Encryption service is still loading. Wait a few seconds and try again.";
+  }
+
+  if (lower.includes("insufficient funds")) {
+    return "Insufficient Sepolia ETH for gas.";
+  }
+
+  if (lower.includes("already voted")) {
+    return "This wallet already voted.";
+  }
+
+  if (lower.includes("already claimed")) {
+    return "Voting power already claimed.";
+  }
+
+  if (lower.includes("proposal not active")) {
+    return "Voting is not active for this proposal.";
+  }
+
+  if (lower.includes("unauthorized")) {
+    return "Only the proposal creator or deployer can do this.";
+  }
+
+  if (message.length > 140) {
+    return "Transaction failed. Check wallet and try again.";
+  }
+
+  return message || "Transaction failed.";
 }
 
 function proposalState(proposal: ProposalRecord) {
@@ -133,9 +177,10 @@ export default function App() {
   const { connect, connectors, isPending: connectPending } = useConnect();
   const { disconnect } = useDisconnect();
   const { switchChainAsync, switchChain } = useSwitchChain();
-  const { writeContractAsync, isPending } = useWriteContract();
+  const [txPhase, setTxPhase] = useState<TxPhase>("idle");
   const queryClient = useQueryClient();
   const { data = [] } = useProposals();
+  const isTxPending = txPhase !== "idle";
 
   const featuredProposal = data[0];
   const selectedProposal = useMemo(
@@ -169,6 +214,11 @@ export default function App() {
   });
 
   useEffect(() => {
+    const warmupId = window.setTimeout(() => warmRelayer(), 1200);
+    return () => window.clearTimeout(warmupId);
+  }, []);
+
+  useEffect(() => {
     if (route.page === "proposal" && !selectedProposal && data.length > 0) {
       navigate("/proposals");
     }
@@ -185,22 +235,53 @@ export default function App() {
     }
   }
 
+  async function sendWalletTransaction(to: `0x${string}`, data: `0x${string}`) {
+    if (!address) {
+      throw new Error("Connect wallet first.");
+    }
+
+    const ethereum = (window as Window & { ethereum?: EthereumProvider }).ethereum;
+
+    if (!ethereum) {
+      throw new Error("MetaMask not detected.");
+    }
+
+    await ensureSepolia();
+    setTxPhase("wallet");
+    setFeedback("Confirm transaction in your wallet.");
+
+    const hash = await ethereum.request({
+      method: "eth_sendTransaction",
+      params: [{ from: address, to, data }]
+    });
+
+    setTxPhase("confirming");
+    return String(hash);
+  }
+
   async function refresh() {
     await queryClient.invalidateQueries({ queryKey: ["proposals"] });
   }
 
   async function claimVotes() {
     try {
+      if (!address) {
+        setFeedback("Connect wallet first.", "error");
+        return;
+      }
+
+      setTxPhase("wallet");
       setFeedback("");
-      await ensureSepolia();
-      const hash = await writeContractAsync({
-        address: env.boardroomTokenAddress as `0x${string}`,
+      const data = encodeFunctionData({
         abi: tokenAbi,
         functionName: "claimDemoVotes"
       });
+      const hash = await sendWalletTransaction(env.boardroomTokenAddress as `0x${string}`, data);
       setFeedback(`Voting power claimed. ${hash.slice(0, 10)}...`);
     } catch (error) {
-      setFeedback(error instanceof Error ? error.message : "Claim failed", "error");
+      setFeedback(getWalletErrorMessage(error), "error");
+    } finally {
+      setTxPhase("idle");
     }
   }
 
@@ -215,15 +296,15 @@ export default function App() {
         return;
       }
 
+      setTxPhase("wallet");
       setFeedback("");
-      await ensureSepolia();
       const { startTime, endTime } = proposalWindow();
-      const hash = await writeContractAsync({
-        address: env.boardroomAddress as `0x${string}`,
+      const data = encodeFunctionData({
         abi: boardroomAbi,
         functionName: "createProposal",
         args: [form.title.trim(), form.description.trim(), form.category.trim(), startTime, endTime]
       });
+      const hash = await sendWalletTransaction(env.boardroomAddress as `0x${string}`, data);
 
       setFeedback(`Proposal created. ${hash.slice(0, 10)}...`);
       setForm({ title: "", description: "", category: "Treasury" });
@@ -232,7 +313,9 @@ export default function App() {
       }, 3500);
       navigate("/proposals");
     } catch (error) {
-      setFeedback(error instanceof Error ? error.message : "Proposal creation failed", "error");
+      setFeedback(getWalletErrorMessage(error), "error");
+    } finally {
+      setTxPhase("idle");
     }
   }
 
@@ -243,70 +326,78 @@ export default function App() {
         return;
       }
 
-      setFeedback("");
+      setTxPhase("preparing");
+      setFeedback("Preparing encrypted ballot...");
       await ensureSepolia();
       const relayer = await getRelayer();
       const encryptedInput = relayer.createEncryptedInput(env.boardroomAddress, address);
       encryptedInput.add8(choice);
       const proof = await encryptedInput.encrypt();
 
-      const hash = await writeContractAsync({
-        address: env.boardroomAddress as `0x${string}`,
+      const data = encodeFunctionData({
         abi: boardroomAbi,
         functionName: "castVote",
         args: [BigInt(proposalId), toHex(proof.handles[0]), toHex(proof.inputProof)]
       });
+      const hash = await sendWalletTransaction(env.boardroomAddress as `0x${string}`, data);
 
       setFeedback(`Encrypted ballot sent. ${hash.slice(0, 10)}...`);
       setTimeout(() => {
         void refresh();
       }, 3500);
     } catch (error) {
-      setFeedback(error instanceof Error ? error.message : "Vote failed", "error");
+      setFeedback(getWalletErrorMessage(error), "error");
+    } finally {
+      setTxPhase("idle");
     }
   }
 
   async function finalizeProposal(proposalId: number) {
     try {
+      setTxPhase("wallet");
       setFeedback("");
-      await ensureSepolia();
-      const hash = await writeContractAsync({
-        address: env.boardroomAddress as `0x${string}`,
+      const data = encodeFunctionData({
         abi: boardroomAbi,
         functionName: "finalizeProposal",
         args: [BigInt(proposalId)]
       });
+      const hash = await sendWalletTransaction(env.boardroomAddress as `0x${string}`, data);
       setFeedback(`Proposal finalized. ${hash.slice(0, 10)}...`);
       setTimeout(() => {
         void refresh();
       }, 3500);
     } catch (error) {
-      setFeedback(error instanceof Error ? error.message : "Finalize failed", "error");
+      setFeedback(getWalletErrorMessage(error), "error");
+    } finally {
+      setTxPhase("idle");
     }
   }
 
   async function prepareReveal(proposalId: number) {
     try {
+      setTxPhase("wallet");
       setFeedback("");
-      await ensureSepolia();
-      const hash = await writeContractAsync({
-        address: env.boardroomAddress as `0x${string}`,
+      const data = encodeFunctionData({
         abi: boardroomAbi,
         functionName: "prepareFinalReveal",
         args: [BigInt(proposalId)]
       });
+      const hash = await sendWalletTransaction(env.boardroomAddress as `0x${string}`, data);
       setFeedback(`Reveal prepared. ${hash.slice(0, 10)}...`);
       setTimeout(() => {
         void refresh();
       }, 3500);
     } catch (error) {
-      setFeedback(error instanceof Error ? error.message : "Prepare reveal failed", "error");
+      setFeedback(getWalletErrorMessage(error), "error");
+    } finally {
+      setTxPhase("idle");
     }
   }
 
   async function revealResults(proposalId: number) {
     try {
-      setFeedback("");
+      setTxPhase("preparing");
+      setFeedback("Preparing final tally...");
       await ensureSepolia();
       const [forHandle, againstHandle, abstainHandle] = await queryClient.fetchQuery({
         queryKey: ["reveal-handles", proposalId],
@@ -329,19 +420,21 @@ export default function App() {
       const relayer = await getRelayer();
       const results = await relayer.publicDecrypt([forHandle, againstHandle, abstainHandle]);
 
-      const hash = await writeContractAsync({
-        address: env.boardroomAddress as `0x${string}`,
+      const data = encodeFunctionData({
         abi: boardroomAbi,
         functionName: "submitFinalReveal",
         args: [BigInt(proposalId), results.abiEncodedClearValues, results.decryptionProof]
       });
+      const hash = await sendWalletTransaction(env.boardroomAddress as `0x${string}`, data);
 
       setFeedback(`Result revealed. ${hash.slice(0, 10)}...`);
       setTimeout(() => {
         void refresh();
       }, 3500);
     } catch (error) {
-      setFeedback(error instanceof Error ? error.message : "Reveal failed", "error");
+      setFeedback(getWalletErrorMessage(error), "error");
+    } finally {
+      setTxPhase("idle");
     }
   }
 
@@ -403,8 +496,8 @@ export default function App() {
               <button className="secondary" onClick={() => switchChain({ chainId: sepolia.id })} disabled={chainId === sepolia.id}>
                 {chainId === sepolia.id ? "Sepolia connected" : "Switch network"}
               </button>
-              <button onClick={claimVotes} disabled={isPending || Boolean(hasClaimedVotes)}>
-                {hasClaimedVotes ? "Votes claimed" : "Claim voting power"}
+              <button onClick={claimVotes} disabled={isTxPending || Boolean(hasClaimedVotes)}>
+                {hasClaimedVotes ? "Votes claimed" : isTxPending ? "Working..." : "Claim voting power"}
               </button>
               <button className="secondary" onClick={() => disconnect()}>
                 Disconnect
@@ -576,21 +669,21 @@ export default function App() {
               <div className="action-grid">
                 <button
                   onClick={() => castVote(selectedProposal.id, 1)}
-                  disabled={isPending || !isVotingActive(selectedProposal) || Boolean(alreadyVoted)}
+                  disabled={isTxPending || !isVotingActive(selectedProposal) || Boolean(alreadyVoted)}
                 >
-                  Vote For
+                  {txPhase === "preparing" ? "Encrypting..." : "Vote For"}
                 </button>
                 <button
                   className="secondary"
                   onClick={() => castVote(selectedProposal.id, 0)}
-                  disabled={isPending || !isVotingActive(selectedProposal) || Boolean(alreadyVoted)}
+                  disabled={isTxPending || !isVotingActive(selectedProposal) || Boolean(alreadyVoted)}
                 >
                   Vote Against
                 </button>
                 <button
                   className="secondary"
                   onClick={() => castVote(selectedProposal.id, 2)}
-                  disabled={isPending || !isVotingActive(selectedProposal) || Boolean(alreadyVoted)}
+                  disabled={isTxPending || !isVotingActive(selectedProposal) || Boolean(alreadyVoted)}
                 >
                   Abstain
                 </button>
@@ -600,21 +693,21 @@ export default function App() {
                 <button
                   className="secondary"
                   onClick={() => finalizeProposal(selectedProposal.id)}
-                  disabled={isPending || selectedProposal.finalized || isVotingActive(selectedProposal) || !canManageSelectedProposal}
+                  disabled={isTxPending || selectedProposal.finalized || isVotingActive(selectedProposal) || !canManageSelectedProposal}
                 >
                   Finalize
                 </button>
                 <button
                   className="secondary"
                   onClick={() => prepareReveal(selectedProposal.id)}
-                  disabled={isPending || !selectedProposal.finalized || selectedProposal.revealRequested || !canManageSelectedProposal}
+                  disabled={isTxPending || !selectedProposal.finalized || selectedProposal.revealRequested || !canManageSelectedProposal}
                 >
                   Prepare Reveal
                 </button>
                 <button
                   className="secondary"
                   onClick={() => revealResults(selectedProposal.id)}
-                  disabled={isPending || !selectedProposal.revealRequested || Boolean(selectedProposal.result) || !canManageSelectedProposal}
+                  disabled={isTxPending || !selectedProposal.revealRequested || Boolean(selectedProposal.result) || !canManageSelectedProposal}
                 >
                   Reveal Result
                 </button>
@@ -746,8 +839,8 @@ export default function App() {
                 <span className="state-pill">{hasClaimedVotes ? "Claimed" : "Available"}</span>
               </div>
               <p className="section-copy">Each wallet can claim one demo allocation of Boardroom Votes on Sepolia.</p>
-              <button onClick={claimVotes} disabled={isPending || Boolean(hasClaimedVotes)}>
-                {hasClaimedVotes ? "Voting power claimed" : "Claim voting power"}
+              <button onClick={claimVotes} disabled={isTxPending || Boolean(hasClaimedVotes)}>
+                {hasClaimedVotes ? "Voting power claimed" : isTxPending ? "Working..." : "Claim voting power"}
               </button>
             </article>
 
@@ -785,7 +878,9 @@ export default function App() {
                   />
                 </label>
               </div>
-              <button onClick={createProposal} disabled={isPending}>Create proposal</button>
+              <button onClick={createProposal} disabled={isTxPending}>
+                {isTxPending ? "Working..." : "Create proposal"}
+              </button>
             </article>
           </section>
         </section>
