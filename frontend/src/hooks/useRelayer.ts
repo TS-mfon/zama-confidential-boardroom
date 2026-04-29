@@ -1,4 +1,4 @@
-import { createInstance, initSDK, SepoliaConfig } from "@zama-fhe/relayer-sdk/web";
+import { createInstance, initSDK, SepoliaConfig } from "@zama-fhe/relayer-sdk/bundle";
 import { env } from "../lib/env";
 
 let relayerPromise: Promise<Awaited<ReturnType<typeof createInstance>>> | null = null;
