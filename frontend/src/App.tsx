@@ -693,9 +693,9 @@ export default function App() {
                 <button
                   className="secondary"
                   onClick={() => finalizeProposal(selectedProposal.id)}
-                  disabled={isTxPending || selectedProposal.finalized || isVotingActive(selectedProposal) || !canManageSelectedProposal}
+                  disabled={isTxPending || selectedProposal.finalized || !canManageSelectedProposal}
                 >
-                  Finalize
+                  Close Voting
                 </button>
                 <button
                   className="secondary"

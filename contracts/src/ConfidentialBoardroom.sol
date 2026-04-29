@@ -107,7 +107,6 @@ contract ConfidentialBoardroom is ZamaEthereumConfig {
 
     function finalizeProposal(uint256 proposalId) external onlyProposalManager(proposalId) {
         Proposal storage proposal = proposals[proposalId];
-        require(block.timestamp > proposal.endTime, "vote active");
         require(!proposal.finalized, "finalized");
         proposal.finalized = true;
         emit ProposalFinalized(proposalId);
