@@ -8,6 +8,7 @@ contract BoardroomToken is ZamaEthereumConfig {
     mapping(address => euint64) private balances;
     mapping(address => bool) public claimedDemoVotes;
     address public owner;
+    address public boardroom;
     uint64 public constant DEMO_VOTE_ALLOCATION = 100;
 
     event Minted(address indexed to);
@@ -26,6 +27,11 @@ contract BoardroomToken is ZamaEthereumConfig {
         _mint(to, amount);
     }
 
+    function setBoardroom(address boardroom_) external onlyOwner {
+        require(boardroom_ != address(0), "zero boardroom");
+        boardroom = boardroom_;
+    }
+
     function claimDemoVotes() external {
         require(!claimedDemoVotes[msg.sender], "already claimed");
         claimedDemoVotes[msg.sender] = true;
@@ -38,6 +44,9 @@ contract BoardroomToken is ZamaEthereumConfig {
         balances[to] = FHE.add(balances[to], encryptedAmount);
         FHE.allowThis(balances[to]);
         FHE.allow(balances[to], to);
+        if (boardroom != address(0)) {
+            FHE.allow(balances[to], boardroom);
+        }
         emit Minted(to);
     }
 

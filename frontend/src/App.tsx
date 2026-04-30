@@ -120,6 +120,10 @@ function getWalletErrorMessage(error: unknown) {
     return "Voting power already claimed.";
   }
 
+  if (lower.includes("no voting power")) {
+    return "Claim voting power before voting.";
+  }
+
   if (lower.includes("proposal not active")) {
     return "Voting is not active for this proposal.";
   }
@@ -508,6 +512,7 @@ export default function App() {
     if (!address) return "Connect wallet";
     if (isCheckingVoteStatus) return "Checking...";
     if (hasVotedSelectedProposal) return "Already voted";
+    if (!hasClaimedVotes) return "Claim votes first";
     if (txPhase === "preparing") return "Encrypting...";
     if (txPhase === "wallet") return "Confirm wallet";
     if (txPhase === "confirming") return "Confirming...";
@@ -515,7 +520,14 @@ export default function App() {
   }
 
   function voteButtonDisabled(proposal: ProposalRecord) {
-    return isTxPending || !address || isCheckingVoteStatus || hasVotedSelectedProposal || !isVotingActive(proposal);
+    return (
+      isTxPending ||
+      !address ||
+      isCheckingVoteStatus ||
+      hasVotedSelectedProposal ||
+      !hasClaimedVotes ||
+      !isVotingActive(proposal)
+    );
   }
 
   return (

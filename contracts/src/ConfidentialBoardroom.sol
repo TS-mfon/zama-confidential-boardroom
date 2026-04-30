@@ -7,6 +7,7 @@ import "./ResultRevealAdapter.sol";
 
 interface IBoardroomToken {
     function encryptedBalanceOf(address user) external view returns (euint64);
+    function claimedDemoVotes(address user) external view returns (bool);
 }
 
 contract ConfidentialBoardroom is ZamaEthereumConfig {
@@ -85,6 +86,7 @@ contract ConfidentialBoardroom is ZamaEthereumConfig {
         require(block.timestamp >= proposal.startTime, "vote not started");
         require(block.timestamp <= proposal.endTime, "vote ended");
         require(!hasVoted[proposalId][msg.sender], "already voted");
+        require(boardroomToken.claimedDemoVotes(msg.sender), "no voting power");
 
         euint8 choice = FHE.fromExternal(encryptedChoice, inputProof);
         euint64 weight = boardroomToken.encryptedBalanceOf(msg.sender);
