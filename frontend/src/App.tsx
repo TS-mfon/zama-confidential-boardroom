@@ -381,7 +381,7 @@ export default function App() {
       }
 
       setTxPhase("preparing");
-      setFeedback("Preparing encrypted ballot...");
+      setFeedback("Preparing encrypted ballot. MetaMask will open after FHE encryption finishes; this can take 1-2 minutes.");
       await ensureSepolia();
       const relayer = await getRelayer();
       const encryptedInput = relayer.createEncryptedInput(env.boardroomAddress, address);
@@ -811,7 +811,7 @@ export default function App() {
               <p className="section-copy">
                 {hasVotedSelectedProposal
                   ? "This wallet has already submitted a ballot for this proposal."
-                  : "Claim voting power once, then cast an encrypted ballot from this page."}
+                  : "Claim voting power once, then cast an encrypted ballot. MetaMask opens after encryption is prepared."}
               </p>
               {!canManageSelectedProposal && selectedProposal.finalized ? (
                 <p className="section-copy">Only the proposal creator or deployer can finalize, prepare, and publish the final reveal.</p>

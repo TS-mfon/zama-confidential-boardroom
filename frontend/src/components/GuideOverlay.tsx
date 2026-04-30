@@ -22,8 +22,8 @@ const steps = [
   {
     kicker: "Step 4",
     title: "Cast an encrypted ballot",
-    body: "Choose For, Against, or Abstain. The app prepares an encrypted vote locally before asking your wallet to submit the transaction.",
-    points: ["Your ballot is not revealed.", "A wallet can vote once per proposal.", "Buttons lock after confirmation."]
+    body: "Choose For, Against, or Abstain. The app must prepare the encrypted FHE ballot before MetaMask can open, so the wallet popup may take one to two minutes on some devices. That preparation step is expected and is not a bug.",
+    points: ["Your ballot is not revealed.", "Wait for encryption to finish.", "Buttons lock after confirmation."]
   },
   {
     kicker: "Step 5",
