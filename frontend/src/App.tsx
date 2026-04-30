@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { encodeFunctionData, toHex } from "viem";
+import { createPublicClient, encodeFunctionData, http, toHex } from "viem";
 import {
   useAccount,
   useConnect,
@@ -16,6 +16,11 @@ import { boardroomAbi, tokenAbi } from "./lib/contracts";
 import { env } from "./lib/env";
 import type { ProposalRecord } from "./lib/types";
 
+const publicClient = createPublicClient({
+  chain: sepolia,
+  transport: http(env.sepoliaRpcUrl)
+});
+
 type Route =
   | { page: "home" }
   | { page: "proposals" }
@@ -30,11 +35,37 @@ type EthereumProvider = {
 
 type TxPhase = "idle" | "preparing" | "wallet" | "confirming";
 
-function proposalWindow() {
-  const now = Math.floor(Date.now() / 1000);
+function toDateTimeLocalValue(date: Date) {
+  const offsetDate = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
+  return offsetDate.toISOString().slice(0, 16);
+}
+
+function defaultProposalStart() {
+  return toDateTimeLocalValue(new Date(Date.now() + 5 * 60_000));
+}
+
+function proposalWindow(startDateTime: string, durationHoursValue: string) {
+  const startMillis = new Date(startDateTime).getTime();
+  const durationHours = Number(durationHoursValue);
+
+  if (!Number.isFinite(startMillis)) {
+    throw new Error("Choose a valid start time.");
+  }
+
+  if (!Number.isFinite(durationHours) || durationHours < 0.25 || durationHours > 720) {
+    throw new Error("Duration must be between 15 minutes and 30 days.");
+  }
+
+  const startTime = Math.floor(startMillis / 1000);
+  const endTime = Math.floor(startTime + durationHours * 60 * 60);
+
+  if (endTime <= startTime) {
+    throw new Error("Proposal duration is too short.");
+  }
+
   return {
-    startTime: BigInt(now - 60),
-    endTime: BigInt(now + 60 * 60 * 24 * 2)
+    startTime: BigInt(startTime),
+    endTime: BigInt(endTime)
   };
 }
 
@@ -168,10 +199,13 @@ export default function App() {
   const [form, setForm] = useState({
     title: "",
     description: "",
-    category: "Treasury"
+    category: "Treasury",
+    startDateTime: defaultProposalStart(),
+    durationHours: "24"
   });
   const [actionMessage, setActionMessage] = useState("");
   const [actionTone, setActionTone] = useState<"default" | "error">("default");
+  const [localVotedKeys, setLocalVotedKeys] = useState<Set<string>>(() => new Set());
   const { route, navigate } = useRoute();
   const { address, chainId, isConnected } = useAccount();
   const { connect, connectors, isPending: connectPending } = useConnect();
@@ -181,6 +215,7 @@ export default function App() {
   const queryClient = useQueryClient();
   const { data = [] } = useProposals();
   const isTxPending = txPhase !== "idle";
+  const minProposalStart = useMemo(() => toDateTimeLocalValue(new Date(Date.now() - 60_000)), []);
 
   const featuredProposal = data[0];
   const selectedProposal = useMemo(
@@ -196,7 +231,11 @@ export default function App() {
     query: { enabled: Boolean(address) }
   });
 
-  const { data: alreadyVoted } = useReadContract({
+  const {
+    data: alreadyVoted,
+    isLoading: isVoteStatusLoading,
+    isFetching: isVoteStatusFetching
+  } = useReadContract({
     address: env.boardroomAddress as `0x${string}`,
     abi: boardroomAbi,
     functionName: "hasVoted",
@@ -256,7 +295,16 @@ export default function App() {
     });
 
     setTxPhase("confirming");
-    return String(hash);
+    setFeedback("Waiting for confirmation...");
+
+    const txHash = String(hash) as `0x${string}`;
+    const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+
+    if (receipt.status !== "success") {
+      throw new Error("Transaction reverted.");
+    }
+
+    return txHash;
   }
 
   async function refresh() {
@@ -298,7 +346,7 @@ export default function App() {
 
       setTxPhase("wallet");
       setFeedback("");
-      const { startTime, endTime } = proposalWindow();
+      const { startTime, endTime } = proposalWindow(form.startDateTime, form.durationHours);
       const data = encodeFunctionData({
         abi: boardroomAbi,
         functionName: "createProposal",
@@ -307,7 +355,13 @@ export default function App() {
       const hash = await sendWalletTransaction(env.boardroomAddress as `0x${string}`, data);
 
       setFeedback(`Proposal created. ${hash.slice(0, 10)}...`);
-      setForm({ title: "", description: "", category: "Treasury" });
+      setForm({
+        title: "",
+        description: "",
+        category: "Treasury",
+        startDateTime: defaultProposalStart(),
+        durationHours: "24"
+      });
       setTimeout(() => {
         void refresh();
       }, 3500);
@@ -340,7 +394,13 @@ export default function App() {
         args: [BigInt(proposalId), toHex(proof.handles[0]), toHex(proof.inputProof)]
       });
       const hash = await sendWalletTransaction(env.boardroomAddress as `0x${string}`, data);
+      const voteKey = `${proposalId}:${address.toLowerCase()}`;
 
+      setLocalVotedKeys((current) => {
+        const next = new Set(current);
+        next.add(voteKey);
+        return next;
+      });
       setFeedback(`Encrypted ballot sent. ${hash.slice(0, 10)}...`);
       setTimeout(() => {
         void refresh();
@@ -402,13 +462,7 @@ export default function App() {
       const [forHandle, againstHandle, abstainHandle] = await queryClient.fetchQuery({
         queryKey: ["reveal-handles", proposalId],
         queryFn: async () => {
-          const { createPublicClient, http } = await import("viem");
-          const client = createPublicClient({
-            chain: sepolia,
-            transport: http(env.sepoliaRpcUrl)
-          });
-
-          return client.readContract({
+          return publicClient.readContract({
             address: env.boardroomAddress as `0x${string}`,
             abi: boardroomAbi,
             functionName: "getRevealHandles",
@@ -444,6 +498,25 @@ export default function App() {
       (address.toLowerCase() === selectedProposal.proposer.toLowerCase() ||
         address.toLowerCase() === String(boardroomOwner).toLowerCase())
   );
+  const selectedVoteKey = address && selectedProposal ? `${selectedProposal.id}:${address.toLowerCase()}` : "";
+  const hasVotedSelectedProposal = Boolean(alreadyVoted || (selectedVoteKey && localVotedKeys.has(selectedVoteKey)));
+  const isCheckingVoteStatus = Boolean(
+    address && selectedProposal && (isVoteStatusLoading || (isVoteStatusFetching && alreadyVoted === undefined))
+  );
+
+  function voteButtonLabel(defaultLabel: string) {
+    if (!address) return "Connect wallet";
+    if (isCheckingVoteStatus) return "Checking...";
+    if (hasVotedSelectedProposal) return "Already voted";
+    if (txPhase === "preparing") return "Encrypting...";
+    if (txPhase === "wallet") return "Confirm wallet";
+    if (txPhase === "confirming") return "Confirming...";
+    return defaultLabel;
+  }
+
+  function voteButtonDisabled(proposal: ProposalRecord) {
+    return isTxPending || !address || isCheckingVoteStatus || hasVotedSelectedProposal || !isVotingActive(proposal);
+  }
 
   return (
     <main className="app-shell">
@@ -669,23 +742,23 @@ export default function App() {
               <div className="action-grid">
                 <button
                   onClick={() => castVote(selectedProposal.id, 1)}
-                  disabled={isTxPending || !isVotingActive(selectedProposal) || Boolean(alreadyVoted)}
+                  disabled={voteButtonDisabled(selectedProposal)}
                 >
-                  {txPhase === "preparing" ? "Encrypting..." : "Vote For"}
+                  {voteButtonLabel("Vote For")}
                 </button>
                 <button
                   className="secondary"
                   onClick={() => castVote(selectedProposal.id, 0)}
-                  disabled={isTxPending || !isVotingActive(selectedProposal) || Boolean(alreadyVoted)}
+                  disabled={voteButtonDisabled(selectedProposal)}
                 >
-                  Vote Against
+                  {voteButtonLabel("Vote Against")}
                 </button>
                 <button
                   className="secondary"
                   onClick={() => castVote(selectedProposal.id, 2)}
-                  disabled={isTxPending || !isVotingActive(selectedProposal) || Boolean(alreadyVoted)}
+                  disabled={voteButtonDisabled(selectedProposal)}
                 >
-                  Abstain
+                  {voteButtonLabel("Abstain")}
                 </button>
               </div>
 
@@ -736,7 +809,7 @@ export default function App() {
                 <p className="section-copy">Ballots and live tallies remain encrypted while voting is active.</p>
               )}
               <p className="section-copy">
-                {alreadyVoted
+                {hasVotedSelectedProposal
                   ? "This wallet has already submitted a ballot for this proposal."
                   : "Claim voting power once, then cast an encrypted ballot from this page."}
               </p>
@@ -876,6 +949,30 @@ export default function App() {
                     placeholder="Move a portion of idle treasury into a lower-volatility yield strategy."
                     rows={5}
                   />
+                </label>
+                <label>
+                  <span>Voting starts</span>
+                  <input
+                    type="datetime-local"
+                    value={form.startDateTime}
+                    min={minProposalStart}
+                    onChange={(event) => setForm((current) => ({ ...current, startDateTime: event.target.value }))}
+                  />
+                </label>
+                <label>
+                  <span>Duration</span>
+                  <select
+                    value={form.durationHours}
+                    onChange={(event) => setForm((current) => ({ ...current, durationHours: event.target.value }))}
+                  >
+                    <option value="0.25">15 minutes</option>
+                    <option value="1">1 hour</option>
+                    <option value="6">6 hours</option>
+                    <option value="24">24 hours</option>
+                    <option value="72">3 days</option>
+                    <option value="168">7 days</option>
+                    <option value="720">30 days</option>
+                  </select>
                 </label>
               </div>
               <button onClick={createProposal} disabled={isTxPending}>

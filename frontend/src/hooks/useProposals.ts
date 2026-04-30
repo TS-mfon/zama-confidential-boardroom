@@ -20,37 +20,39 @@ export function useProposals() {
         functionName: "nextProposalId"
       });
 
-      const proposals: ProposalRecord[] = [];
-      for (let id = 1n; id < nextProposalId; id += 1n) {
-        const proposal = await client.readContract({
-          address: env.boardroomAddress as `0x${string}`,
-          abi: boardroomAbi,
-          functionName: "getProposal",
-          args: [id]
-        });
+      const ids = Array.from({ length: Number(nextProposalId - 1n) }, (_, index) => BigInt(index + 1));
 
-        const result = await client.readContract({
-          address: env.resultAdapterAddress as `0x${string}`,
-          abi: resultAbi,
-          functionName: "getRevealedResult",
-          args: [id]
-        });
+      return Promise.all(
+        ids.map(async (id) => {
+          const [proposal, result] = await Promise.all([
+            client.readContract({
+              address: env.boardroomAddress as `0x${string}`,
+              abi: boardroomAbi,
+              functionName: "getProposal",
+              args: [id]
+            }),
+            client.readContract({
+              address: env.resultAdapterAddress as `0x${string}`,
+              abi: resultAbi,
+              functionName: "getRevealedResult",
+              args: [id]
+            })
+          ]);
 
-        proposals.push({
-          id: Number(proposal[0]),
-          title: proposal[1],
-          description: proposal[2],
-          category: proposal[3],
-          proposer: proposal[4],
-          startTime: Number(proposal[5]),
-          endTime: Number(proposal[6]),
-          finalized: proposal[7],
-          revealRequested: proposal[8],
-          result: result.revealedAt > 0n ? result : undefined
-        });
-      }
-
-      return proposals;
+          return {
+            id: Number(proposal[0]),
+            title: proposal[1],
+            description: proposal[2],
+            category: proposal[3],
+            proposer: proposal[4],
+            startTime: Number(proposal[5]),
+            endTime: Number(proposal[6]),
+            finalized: proposal[7],
+            revealRequested: proposal[8],
+            result: result.revealedAt > 0n ? result : undefined
+          };
+        })
+      );
     }
   });
 }
